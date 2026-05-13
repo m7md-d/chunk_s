@@ -30,6 +30,9 @@ int main(int argc, char **argv)
 
     file_size = get_file_size(src_file);
 
+    if ((long)num_chunks > file_size || file_size > 1048576L) /* 1048576 == 1MB */
+        return (1);
+
     chunk_size = file_size / num_chunks;
 
     chunk_buffer = malloc(chunk_size + file_size % num_chunks);
