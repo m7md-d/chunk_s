@@ -5,7 +5,7 @@ A C program that splits a binary file into `n` equal-sized chunks (1 ≤ n ≤ 8
 ## Compilation
 
 ```sh
-cc -Wall -Wextra -o e code.c
+gcc -Wall -Wextra -o e code.c
 ```
 
 ## Usage
