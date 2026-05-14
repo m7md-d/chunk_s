@@ -9,7 +9,7 @@ typedef struct pmd
     long chunk_size;
     int extra_bytes;
     int num_chunks;
-    unsigned short rb;
+    unsigned short decoy_mask;
 } pmd;
 
 /** Get the size of an open file without altering the file position */
@@ -23,40 +23,42 @@ long get_file_size(FILE *file)
     return file_size;
 }
 
-unsigned short fake_file(int total, int n_random)
+unsigned short gen_decoy_mask(int slots, int num_decoys)
 {
-    unsigned short rb = 0;
-    unsigned short mask = (1 << total)-1;
-    int placed = 0;
-    int pos;
-    srand(time(NULL));
-    while (placed < n_random)
-    {
-        pos = rand() % total;
-        if(!((rb >> pos)& 1))
-        {
+    unsigned short decoy_mask = 0, mask = (1 << slots)-1;
+    int cnt = 0, bit;
 
-            rb |= (1 << pos);
-            placed++;
+    while (cnt < num_decoys)
+    {
+        bit = rand() % slots;
+        if (!((decoy_mask >> bit) & 1))
+        {
+            decoy_mask |= (1 << bit);
+            cnt++;
         }
     }
-    return(rb & mask);
+    return (decoy_mask & mask);
 }
 
-void fake_gen(char **argv, char *chunk_buffer, long chunk_size, char *chunk_name, int j)
+void gen_decoy_chunk(char **argv, char *chunk_buffer, long chunk_size, char *chunk_name, int idx)
 {
     FILE *chunk_file;
     unsigned int state;
     size_t i;
 
-    sprintf(chunk_name, "%s.%d", argv[2], j);
+    sprintf(chunk_name, "%s.%d", argv[2], idx);
     chunk_file = fopen(chunk_name, "wb");
+    if (!chunk_file)
+    {
+        fprintf(stderr, "Error: Cannot create decoy chunk '%s'\n", chunk_name);
+        exit(1);
+    }
 
     state = (unsigned int)rand();
 
     for (i = 0; i < chunk_size; i++)
     {
-        state = state * 1103515245u + 12345u * j;
+        state = state * 1103515245u + 12345u * idx;
         chunk_buffer[i] = (unsigned char)state >> 16;
     }
 
@@ -71,7 +73,7 @@ int check_pmd(pmd *meta, long file_size)
     int extra_bytes = 0, i = 0;
     long chunk_size;
     char chunk_name[256];
-    FILE *tmp;
+    FILE *chunk_fp;
 
     if (file_size > 1048576L)
     {
@@ -85,20 +87,21 @@ int check_pmd(pmd *meta, long file_size)
             extra_bytes = meta->extra_bytes;
 
         sprintf(chunk_name, "%s.%d", meta->name, i);
-        tmp = fopen(chunk_name, "rb");
-        if (!tmp)
+        chunk_fp = fopen(chunk_name, "rb");
+        if (!chunk_fp)
         {
             fprintf(stderr, "Error: Cannot open chunk file '%s'\n", chunk_name);
             return (3);
         }
-        chunk_size = get_file_size(tmp);
+        chunk_size = get_file_size(chunk_fp);
         if (chunk_size != meta->chunk_size + extra_bytes)
         {
             fprintf(stderr, "Error: Chunk '%s' has unexpected size (expected %ld, got %ld)\n",
                     chunk_name, meta->chunk_size + extra_bytes, chunk_size);
+            fclose(chunk_fp);
             return (5);
         }
-        fclose(tmp);
+        fclose(chunk_fp);
     }
     return (0);
 }
@@ -106,12 +109,12 @@ int check_pmd(pmd *meta, long file_size)
 /** Merge chunks into a single file */
 int merge(int argc, char **argv)
 {
-    int extra_bytes = 0, i = 0, r = 0, n, n_rand = 0, real;
+    int extra_bytes = 0, i = 0, start_chunk = 0, idx, num_decoys = 0, real_cnt;
     long file_size;
-    char chunk_name[256], *file_out, file_name[256], R = 0;
+    char chunk_name[256], *file_out, file_name[256], inc_decoy = 0;
     size_t bytes_read;
     pmd meta;
-    FILE *pmd_file = fopen(argv[2], "rb"), *chunk, *tmp;
+    FILE *pmd_file = fopen(argv[2], "rb"), *chunk, *out_file;
 
     if (!pmd_file)
     {
@@ -119,20 +122,25 @@ int merge(int argc, char **argv)
         return (3);
     }
 
-    fread(&meta, 1, sizeof(pmd), pmd_file);
+    if (fread(&meta, 1, sizeof(pmd), pmd_file) != sizeof(pmd))
+    {
+        fprintf(stderr, "Error: Failed to read PMD metadata from '%s'\n", argv[2]);
+        fclose(pmd_file);
+        return (3);
+    }
     fclose(pmd_file);
 
     if (argc == 3)
         sprintf(file_name, "%s.m",meta.name);
     else if (argc == 6 && !strcmp(argv[3], "-r"))
     {
-        r = atoi(argv[4]);
+        start_chunk = atoi(argv[4]);
         strcpy(file_name, argv[5]);
     }
     else if (argc == 5 && !strcmp(argv[3], "-R"))
     {
         strcpy(file_name, argv[4]);
-        R = 1;
+        inc_decoy = 1;
     }
     else
     {
@@ -140,10 +148,10 @@ int merge(int argc, char **argv)
         exit(1);
     }
     for (i = 0; i < 16; i++)
-        if ((meta.rb >> i) & 0b1)
-            n_rand++;
+        if ((meta.decoy_mask >> i) & 0b1)
+            num_decoys++;
 
-    file_size = (meta.chunk_size * (meta.num_chunks + n_rand)) + meta.extra_bytes;
+    file_size = (meta.chunk_size * (meta.num_chunks + num_decoys)) + meta.extra_bytes;
 
     if (check_pmd(&meta, file_size))
     {
@@ -152,34 +160,52 @@ int merge(int argc, char **argv)
     }
 
     file_out = malloc(file_size);
+    if (!file_out)
+    {
+        fprintf(stderr, "Error: Memory allocation failed (%ld bytes)\n", file_size);
+        return (1);
+    }
 
     sprintf(chunk_name, "%s.m", meta.name);
-    tmp = fopen(file_name, "wb");
-
-    for (real = 0, n = r, i = 0; i < meta.num_chunks + n_rand; i++, n++)
+    out_file = fopen(file_name, "wb");
+    if (!out_file)
     {
-        if (((meta.rb >> i) & 0b1) && !R)
+        fprintf(stderr, "Error: Cannot create output file '%s'\n", file_name);
+        free(file_out);
+        return (3);
+    }
+
+    for (real_cnt = 0, idx = start_chunk, i = 0; i < meta.num_chunks + num_decoys; i++, idx++)
+    {
+        if (((meta.decoy_mask >> i) & 0b1) && !inc_decoy)
             continue;
 
-        if (real == meta.num_chunks - 1)
+        if (real_cnt == meta.num_chunks - 1)
             extra_bytes = meta.extra_bytes;
-        if (!((meta.rb >> i) & 0b1))
-            real++;
-        if ((meta.rb >> i) & 0b1)
+        if (!((meta.decoy_mask >> i) & 0b1))
+            real_cnt++;
+        if ((meta.decoy_mask >> i) & 0b1)
             extra_bytes = 0;
-        if (n == meta.num_chunks + n_rand)
+        if (idx == meta.num_chunks + num_decoys)
         {
-            n = 0;
+            idx = 0;
             extra_bytes = 0;
         }
 
-        sprintf(chunk_name, "%s.%d", meta.name, n);
+        sprintf(chunk_name, "%s.%d", meta.name, idx);
         chunk = fopen(chunk_name, "rb");
+        if (!chunk)
+        {
+            fprintf(stderr, "Error: Cannot open chunk '%s'\n", chunk_name);
+            fclose(out_file);
+            free(file_out);
+            return (3);
+        }
         bytes_read = fread(file_out, 1, meta.chunk_size + extra_bytes, chunk);
-        fwrite(file_out, bytes_read, 1, tmp);
+        fwrite(file_out, bytes_read, 1, out_file);
         fclose(chunk);
     }
-    fclose(tmp);
+    fclose(out_file);
     free(file_out);
 
     return (0);
@@ -188,13 +214,13 @@ int merge(int argc, char **argv)
 /** Parse a file into chunks */
 int pars_file(int argc, char **argv)
 {
-    int num_chunks, extra_bytes = 0, i, r = 0, n_random = 0, n;
+    int num_chunks, extra_bytes = 0, i, num_decoys = 0, real_cnt;
     long chunk_size, file_size;
     FILE *src_file, *chunk_file;
     char *chunk_buffer, chunk_name[256];
     size_t bytes_read;
     pmd meta;
-    unsigned short rb;
+    unsigned short decoy_mask;
 
     num_chunks = atoi(argv[3]);
     if (num_chunks <= 0 || num_chunks > 8)
@@ -204,8 +230,7 @@ int pars_file(int argc, char **argv)
     }
 
     if (argc == 6 && !strcmp(argv[4], "-R"))
-        n_random = atoi(argv[5]);
-
+        num_decoys = atoi(argv[5]);
 
     src_file = fopen(argv[2], "rb");
     if (!src_file)
@@ -219,28 +244,36 @@ int pars_file(int argc, char **argv)
     if ((long)num_chunks > file_size)
     {
         fprintf(stderr, "Error: More chunks than bytes in file\n");
+        fclose(src_file);
         return (4);
     }
 
     if (file_size > 1048576L)
     {
         fprintf(stderr, "Error: File size exceeds 1MB limit\n");
+        fclose(src_file);
         return (4);
     }
 
     chunk_size = file_size / num_chunks;
 
     chunk_buffer = malloc(chunk_size + file_size % num_chunks);
-
-    rb = fake_file(num_chunks + n_random, n_random);
-
-    for (n = 0, i = 0; i < num_chunks + n_random; i++)
+    if (!chunk_buffer)
     {
-        if (n == num_chunks - 1)
+        fprintf(stderr, "Error: Memory allocation failed\n");
+        fclose(src_file);
+        return (1);
+    }
+
+    decoy_mask = gen_decoy_mask(num_chunks + num_decoys, num_decoys);
+
+    for (real_cnt = 0, i = 0; i < num_chunks + num_decoys; i++)
+    {
+        if (real_cnt == num_chunks - 1)
             extra_bytes = file_size % num_chunks;
-        if ((rb >> i) & 0b1)
+        if ((decoy_mask >> i) & 0b1)
         {
-            fake_gen(argv, chunk_buffer, chunk_size, chunk_name, i);
+            gen_decoy_chunk(argv, chunk_buffer, chunk_size, chunk_name, i);
             continue;
         }
 
@@ -248,11 +281,18 @@ int pars_file(int argc, char **argv)
 
         sprintf(chunk_name, "%s.%d", argv[2], i);
         chunk_file = fopen(chunk_name, "wb");
+        if (!chunk_file)
+        {
+            fprintf(stderr, "Error: Cannot create chunk '%s'\n", chunk_name);
+            free(chunk_buffer);
+            fclose(src_file);
+            return (3);
+        }
 
         fwrite(chunk_buffer, 1, bytes_read, chunk_file);
 
         fclose(chunk_file);
-        n++;
+        real_cnt++;
     }
     free(chunk_buffer);
 
@@ -260,14 +300,20 @@ int pars_file(int argc, char **argv)
     meta.extra_bytes = extra_bytes;
     strcpy(meta.name, argv[2]);
     meta.num_chunks = num_chunks;
-    meta.rb = rb;
+    meta.decoy_mask = decoy_mask;
 
     printf("%s\n", meta.name);
-    
+
     sprintf(chunk_name, "%s.pmd", argv[2]);
-    FILE *m =fopen(chunk_name, "wb");
-    fwrite(&meta, 1,sizeof(pmd),m);
-    fclose(m);
+    FILE *meta_fp = fopen(chunk_name, "wb");
+    if (!meta_fp)
+    {
+        fprintf(stderr, "Error: Cannot create metadata file '%s'\n", chunk_name);
+        fclose(src_file);
+        return (3);
+    }
+    fwrite(&meta, 1, sizeof(pmd), meta_fp);
+    fclose(meta_fp);
     fclose(src_file);
 
     return (0);
@@ -277,6 +323,8 @@ int pars_file(int argc, char **argv)
 int main(int argc, char **argv)
 {
     int result = 0;
+
+    srand(time(NULL));
 
     if (argc < 3)
     {
