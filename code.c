@@ -87,12 +87,16 @@ int merge(int argc, char **argv)
 
     if (argc == 3)
         sprintf(file_name, "%s.m",meta.name);
-    else if (argc == 6)
+    else if (argc == 6 && !strcmp(argv[3], "-r"))
     {
         r = atoi(argv[4]);
         strcpy(file_name, argv[5]);
     }
-
+    else
+    {
+        fprintf(stderr, "Usage: %s -m <pmd_file> [ -r <start_chunk> <output_file> ]\n", argv[0]);
+        exit(1);
+    }
     file_out = malloc(file_size);
 
     sprintf(chunk_name, "%s.m", meta.name);
