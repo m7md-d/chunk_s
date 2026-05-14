@@ -23,6 +23,7 @@ long get_file_size(FILE *file)
     return file_size;
 }
 
+/** Generate a decoy mask for the specified number of slots and decoys */
 unsigned short gen_decoy_mask(int slots, int num_decoys)
 {
     unsigned short decoy_mask = 0, mask = (1 << slots)-1;
@@ -40,6 +41,7 @@ unsigned short gen_decoy_mask(int slots, int num_decoys)
     return (decoy_mask & mask);
 }
 
+/** Generate a decoy chunk */
 void gen_decoy_chunk(char **argv, char *chunk_buffer, long chunk_size, char *chunk_name, int idx)
 {
     FILE *chunk_file;
