@@ -17,23 +17,26 @@ gcc -Wall -Wextra -o e code.c
 ```
 
 - `<file>` — path to the binary file to split
-- `<n>` — number of chunks (integer, 1–8)
+- `<n>` — number of real chunks (integer, 1–8)
+- `-R <n_fake>` — add `<n_fake>` decoy chunks for plausible deniability
 
 ### Merge mode
 
 ```
 ./e -m <pmd_file> [start_chunk output_file]
+./e -m <pmd_file> -R <output_file>
 ```
 
 - `<pmd_file>` — path to the `.pmd` metadata file created during split
 - `start_chunk` — chunk index to begin merging from (default: 0)
 - `output_file` — name of the reconstructed file (default: `<name>.m`)
+- `-R` — include random/decoy chunks in the output (skipped by default)
 
 ## Output
 
-**Split mode** creates `n` chunk files (`<file>.0`, `<file>.1`, ...) plus a metadata file (`<file>.pmd`).
+**Split mode** creates `n` real chunk files (`<file>.0`, `<file>.1`, ...) plus a metadata file (`<file>.pmd`). If `-R <n_fake>` is given, it also creates `<n_fake>` decoy chunks with pseudo-random content.
 
-**Merge mode** reconstructs the original file from the chunk files, outputting to `<name>.m` (or a custom name).
+**Merge mode** reconstructs the original file from the chunk files, skipping decoy chunks unless `-R` is passed. Outputs to `<name>.m` (or a custom name).
 
 ## Limitations
 
@@ -45,8 +48,9 @@ gcc -Wall -Wextra -o e code.c
 1. The input file size is obtained without moving the read cursor.
 2. Each chunk gets `file_size / n` bytes.
 3. If the file size is not evenly divisible by `n`, the last chunk receives the remaining `file_size % n` extra bytes.
-4. A `.pmd` metadata file is written alongside the chunks, storing the original filename, chunk size, extra bytes, and chunk count.
-5. During merge, the `.pmd` file is read, chunk integrity is verified, and the original file is reconstructed.
+4. When `-R <n_fake>` is used, additional decoy chunks with pseudo-random content are inserted at random positions among the real chunks. The metadata file stores a bitmask tracking which chunks are decoys.
+5. During merge, decoy chunks are skipped unless `-R` is passed to include them.
+6. The `.pmd` file is read, chunk integrity is verified, and the original file is reconstructed.
 
 ## Examples
 
@@ -77,4 +81,30 @@ hello-world-123
 $ ./e -m test.txt.pmd 1 test_recovered.txt
 $ cat test_recovered.txt
 ld-123
+```
+
+### Split with decoy chunks
+
+```sh
+$ ./e -p test.txt 3 -R 2
+$ ls test.txt.*
+test.txt.0  test.txt.1  test.txt.2  test.txt.3  test.txt.4
+$ ls *.pmd
+test.txt.pmd
+```
+
+### Merge skipping decoys (default)
+
+```sh
+$ ./e -m test.txt.pmd
+$ cat test.txt.m
+hello-world-123
+```
+
+### Merge including random chunks
+
+```sh
+$ ./e -m test.txt.pmd -R test_recovered.txt
+$ cat test_recovered.txt
+hello-world-123
 ```
